@@ -23,8 +23,8 @@
 #include <sstream>
 
 #include "zed_wrapper_nodelet.hpp"
-
-#include "zed_wrapper_nodelet.hpp"
+#include "yololayer.h"
+#include "common.hpp"
 
 #ifndef NDEBUG
 #include <ros/console.h>
@@ -35,6 +35,8 @@
 #include <zed_interfaces/PlaneStamped.h>
 
 //#define DEBUG_SENS_TS 1
+
+static Logger gLogger;
 
 namespace zed_nodelets {
 #ifndef DEG2RAD
@@ -4263,6 +4265,9 @@ bool ZEDWrapperNodelet::on_start_object_detection(zed_interfaces::start_object_d
     }
     mObjDetModel = static_cast<sl::DETECTION_MODEL>(req.model);
 
+	if (mObjDetModel == sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS) {
+	}
+
     mObjDetMaxRange = req.max_range;
     if (mObjDetMaxRange > mCamMaxDepth) {
         NODELET_WARN("Detection max range cannot be major than depth max range. Automatically fixed.");
@@ -4319,6 +4324,14 @@ bool ZEDWrapperNodelet::on_stop_object_detection(zed_interfaces::stop_object_det
     return res.done;
 }
 
+void doInference(IExecutionContext& context, cudaStream_t& stream, void **buffers, float* input, float* output, int batchSize) {
+    // DMA input batch data to device, infer on the batch asynchronously, and DMA output back to host
+    CUDA_CHECK(cudaMemcpyAsync(buffers[0], input, batchSize * 3 * INPUT_H * INPUT_W * sizeof (float), cudaMemcpyHostToDevice, stream));
+    context.enqueue(batchSize, buffers, stream, nullptr);
+    CUDA_CHECK(cudaMemcpyAsync(output, buffers[1], batchSize * OUTPUT_SIZE * sizeof (float), cudaMemcpyDeviceToHost, stream));
+    cudaStreamSynchronize(stream);
+}
+
 void ZEDWrapperNodelet::processDetectedObjects(ros::Time t)
 {
     static std::chrono::steady_clock::time_point old_time = std::chrono::steady_clock::now();
@@ -4328,6 +4341,54 @@ void ZEDWrapperNodelet::processDetectedObjects(ros::Time t)
     objectTracker_parameters_rt.object_class_filter = mObjDetFilter;
 
     sl::Objects objects;
+
+    if (mObjDetModel == sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS && zed.grab() == sl::ERROR_CODE::SUCCESS) {
+		static float data[Yolo::BATCH_SIZE * 3 * Yolo::INPUT_H * Yolo::INPUT_W];
+		static float prob[Yolo::BATCH_SIZE * Yolo::OUTPUT_SIZE];
+
+        zed.retrieveImage(left_sl, sl::VIEW::LEFT);
+
+        // Preparing inference
+        cv::Mat left_cv_rgba = slMat2cvMat(left_sl);
+        cv::cvtColor(left_cv_rgba, left_cv_rgb, cv::COLOR_BGRA2BGR);
+        if (left_cv_rgb.empty()) continue;
+        cv::Mat pr_img = preprocess_img(left_cv_rgb, Yolo::INPUT_W, Yolo::INPUT_H); // letterbox BGR to RGB
+        int i = 0;
+        int batch = 0;
+        for (int row = 0; row < Yolo::INPUT_H; ++row) {
+            uchar* uc_pixel = pr_img.data + row * pr_img.step;
+            for (int col = 0; col < Yolo::INPUT_W; ++col) {
+                data[batch * 3 * Yolo::INPUT_H * Yolo::INPUT_W + i] = (float) uc_pixel[2] / 255.0;
+                data[batch * 3 * Yolo::INPUT_H * Yolo::INPUT_W + i + Yolo::INPUT_H * Yolo::INPUT_W] = (float) uc_pixel[1] / 255.0;
+                data[batch * 3 * Yolo::INPUT_H * Yolo::INPUT_W + i + 2 * Yolo::INPUT_H * Yolo::INPUT_W] = (float) uc_pixel[0] / 255.0;
+                uc_pixel += 3;
+                ++i;
+            }
+        }
+
+        // Running inference
+        doInference(data, prob, Yolo::BATCH_SIZE);
+        std::vector<std::vector<Yolo::Detection>> batch_res(Yolo::BATCH_SIZE);
+        auto& res = batch_res[batch];
+        nms(res, &prob[batch * Yolo::OUTPUT_SIZE], Yolo::CONF_THRESH, Yolo::NMS_THRESH);
+
+        // Preparing for ZED SDK ingesting
+        std::vector<sl::CustomBoxObjectData> objects_in;
+        for (auto &it : res) {
+            sl::CustomBoxObjectData tmp;
+            cv::Rect r = get_rect(left_cv_rgb, it.bbox);
+            // Fill the detections into the correct format
+            tmp.unique_object_id = sl::generate_unique_id();
+            tmp.probability = it.conf;
+            tmp.label = (int) it.class_id;
+            tmp.bounding_box_2d = cvt(r);
+            tmp.is_grounded = ((int) it.class_id == 0); // Only the first class (person) is grounded, that is moving on the floor plane
+            // others are tracked in full 3D space
+            objects_in.push_back(tmp);
+        }
+        // Send the custom detected boxes to the ZED
+        zed.ingestCustomBoxObjects(objects_in);
+	}
 
     sl::ERROR_CODE objDetRes = mZed.retrieveObjects(objects, objectTracker_parameters_rt);
 

@@ -2,6 +2,16 @@ cmake_minimum_required(VERSION 3.5)
 
 project(zed_nodelets)
 
+## Compile as C++14, supported in ROS Kinetic and newer
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+option(ENABLE_INT8_CALIBRATOR "Enable int8 calibrator class for quantification calibration, requires opencv dnn" OFF)
+
+IF (ENABLE_INT8_CALIBRATOR)
+    ADD_DEFINITIONS(-DENABLE_INT8_CALIBRATOR)
+ENDIF()
+
 # if CMAKE_BUILD_TYPE is not specified, take 'Release' as default
 IF(NOT CMAKE_BUILD_TYPE)
     SET(CMAKE_BUILD_TYPE Release)
@@ -26,6 +36,9 @@ exec_program(uname ARGS -p OUTPUT_VARIABLE CMAKE_SYSTEM_NAME2)
 if ( CMAKE_SYSTEM_NAME2 MATCHES "aarch64" ) # Jetson TX
     SET(CUDA_USE_STATIC_CUDA_RUNTIME OFF)
 endif()
+
+find_package(OpenCV REQUIRED)
+checkPackage("OpenCV" "OpenCV not found!")
 
 find_package(CUDA)
 checkPackage("CUDA" "CUDA not found, install it from:\n https://developer.nvidia.com/cuda-downloads")
@@ -91,6 +104,7 @@ set(RGBD_SENS_DEMUX_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/rgbd_sensors_demux_nodel
 
 # Specify locations of header files.
 set(INCLUDE_DIRS
+    ${OpenCV_INCLUDE_DIRS}
     ${catkin_INCLUDE_DIRS}
     ${CUDA_INCLUDE_DIRS}
     ${ZED_INCLUDE_DIRS}
@@ -102,6 +116,7 @@ set(INCLUDE_DIRS
 
 link_directories(${ZED_LIBRARY_DIR})
 link_directories(${CUDA_LIBRARY_DIRS})
+link_directories(${OpenCV_LIBRARY_DIRS})
 
 ###############################################################################
 
@@ -110,6 +125,9 @@ link_directories(${CUDA_LIBRARY_DIRS})
 
 add_definitions(-std=c++11 -Wno-deprecated-declarations)
 set(LINK_LIBRARIES
+  ${TRT_LIBS}
+  ${SPECIAL_OS_LIBS}
+  ${OpenCV_LIBRARIES}
   ${catkin_LIBRARIES}
   ${ZED_LIBRARIES}
   ${CUDA_LIBRARIES}
@@ -124,6 +142,7 @@ add_library(ZEDNodelets
 )
 target_include_directories(ZEDNodelets PRIVATE ${INCLUDE_DIRS})
 target_link_libraries(ZEDNodelets ${LINK_LIBRARIES})
+add_definitions(-O3 -D_MWAITXINTRIN_H_INCLUDED -Wno-deprecated-declarations)
 add_dependencies(
     ZEDNodelets
     ${catkin_EXPORTED_TARGETS}
