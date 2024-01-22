@@ -25,6 +25,8 @@
 #include "zed_wrapper_nodelet.hpp"
 #include "yololayer.h"
 #include "common.hpp"
+#include "utils.h"
+#include "utils.hpp"
 
 #ifndef NDEBUG
 #include <ros/console.h>
@@ -4324,14 +4326,6 @@ bool ZEDWrapperNodelet::on_stop_object_detection(zed_interfaces::stop_object_det
     return res.done;
 }
 
-void doInference(IExecutionContext& context, cudaStream_t& stream, void **buffers, float* input, float* output, int batchSize) {
-    // DMA input batch data to device, infer on the batch asynchronously, and DMA output back to host
-    CUDA_CHECK(cudaMemcpyAsync(buffers[0], input, batchSize * 3 * INPUT_H * INPUT_W * sizeof (float), cudaMemcpyHostToDevice, stream));
-    context.enqueue(batchSize, buffers, stream, nullptr);
-    CUDA_CHECK(cudaMemcpyAsync(output, buffers[1], batchSize * OUTPUT_SIZE * sizeof (float), cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
-}
-
 void ZEDWrapperNodelet::processDetectedObjects(ros::Time t)
 {
     static std::chrono::steady_clock::time_point old_time = std::chrono::steady_clock::now();
@@ -4341,17 +4335,19 @@ void ZEDWrapperNodelet::processDetectedObjects(ros::Time t)
     objectTracker_parameters_rt.object_class_filter = mObjDetFilter;
 
     sl::Objects objects;
+    sl::Mat left_sl;
+    cv::Mat left_cv_rgb;
 
-    if (mObjDetModel == sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS && zed.grab() == sl::ERROR_CODE::SUCCESS) {
+    if (mObjDetModel == sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS && mZed.grab() == sl::ERROR_CODE::SUCCESS) {
 		static float data[Yolo::BATCH_SIZE * 3 * Yolo::INPUT_H * Yolo::INPUT_W];
 		static float prob[Yolo::BATCH_SIZE * Yolo::OUTPUT_SIZE];
 
-        zed.retrieveImage(left_sl, sl::VIEW::LEFT);
+        mZed.retrieveImage(left_sl, sl::VIEW::LEFT);
 
         // Preparing inference
         cv::Mat left_cv_rgba = slMat2cvMat(left_sl);
         cv::cvtColor(left_cv_rgba, left_cv_rgb, cv::COLOR_BGRA2BGR);
-        if (left_cv_rgb.empty()) continue;
+        if (left_cv_rgb.empty()) return;
         cv::Mat pr_img = preprocess_img(left_cv_rgb, Yolo::INPUT_W, Yolo::INPUT_H); // letterbox BGR to RGB
         int i = 0;
         int batch = 0;
@@ -4367,7 +4363,7 @@ void ZEDWrapperNodelet::processDetectedObjects(ros::Time t)
         }
 
         // Running inference
-        doInference(data, prob, Yolo::BATCH_SIZE);
+        Yolo::doInference(data, prob, Yolo::BATCH_SIZE);
         std::vector<std::vector<Yolo::Detection>> batch_res(Yolo::BATCH_SIZE);
         auto& res = batch_res[batch];
         nms(res, &prob[batch * Yolo::OUTPUT_SIZE], Yolo::CONF_THRESH, Yolo::NMS_THRESH);
@@ -4381,13 +4377,13 @@ void ZEDWrapperNodelet::processDetectedObjects(ros::Time t)
             tmp.unique_object_id = sl::generate_unique_id();
             tmp.probability = it.conf;
             tmp.label = (int) it.class_id;
-            tmp.bounding_box_2d = cvt(r);
+            tmp.bounding_box_2d = Yolo::cvt(r);
             tmp.is_grounded = ((int) it.class_id == 0); // Only the first class (person) is grounded, that is moving on the floor plane
             // others are tracked in full 3D space
             objects_in.push_back(tmp);
         }
         // Send the custom detected boxes to the ZED
-        zed.ingestCustomBoxObjects(objects_in);
+        mZed.ingestCustomBoxObjects(objects_in);
 	}
 
     sl::ERROR_CODE objDetRes = mZed.retrieveObjects(objects, objectTracker_parameters_rt);

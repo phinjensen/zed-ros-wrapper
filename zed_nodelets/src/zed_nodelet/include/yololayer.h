@@ -4,10 +4,10 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <opencv2/opencv.hpp>
 #include "cuda_utils.h"
 #include "NvInfer.h"
 #include "logging.h"
-
 
 #if NV_TENSORRT_MAJOR >= 8
 #define TRT_NOEXCEPT noexcept
@@ -18,6 +18,8 @@
 #endif
 
 #define USE_FP16  // set USE_INT8 or USE_FP16 or USE_FP32
+
+using namespace nvinfer1;
 
 namespace Yolo
 {
@@ -50,9 +52,9 @@ namespace Yolo
     const char* OUTPUT_BLOB_NAME = "prob";
     static Logger gLogger;
 
-    IRuntime* runtime = nullptr;
-    ICudaEngine* engine = nullptr;
-    IExecutionContext* context = nullptr;
+    IRuntime* runtime;
+    ICudaEngine* engine;
+    IExecutionContext* context;
     cudaStream_t stream;
     void* buffers[2];
 
@@ -61,7 +63,7 @@ namespace Yolo
         std::ifstream file(engine_name, std::ios::binary);
         if (!file.good()) {
             std::cerr << "read " << engine_name << " error!" << std::endl;
-            return -1;
+            return;
         }
         char *trtModelStream = nullptr;
         size_t size = 0;
@@ -73,37 +75,46 @@ namespace Yolo
         file.read(trtModelStream, size);
         file.close();
 
-		runtime = createInferRuntime(gLogger);
-		assert(runtime != nullptr);
-		// trtModelStream is the serialized model text, size is its length, TOOD
-		engine = runtime->deserializeCudaEngine(trtModelStream, size);
-		assert(engine != nullptr);
-		context = engine->createExecutionContext();
-		assert(context != nullptr);
-		delete[] trtModelStream;
-		assert(engine->getNbBindings() == 2);
-		// In order to bind the buffers, we need to know the names of the input and output tensors.
-		// Note that indices are guaranteed to be less than IEngine::getNbBindings()
-		const int inputIndex = engine->getBindingIndex(INPUT_BLOB_NAME);
-		const int outputIndex = engine->getBindingIndex(OUTPUT_BLOB_NAME);
-		assert(inputIndex == 0);
-		assert(outputIndex == 1);
-		// Create GPU buffers on device
-		CUDA_CHECK(cudaMalloc(&buffers[inputIndex], BATCH_SIZE * 3 * INPUT_H * INPUT_W * sizeof (float)));
-		CUDA_CHECK(cudaMalloc(&buffers[outputIndex], BATCH_SIZE * OUTPUT_SIZE * sizeof (float)));
-		// Create stream
-		cudaStream_t stream;
-		CUDA_CHECK(cudaStreamCreate(&stream));
+        runtime = createInferRuntime(gLogger);
+        assert(runtime != nullptr);
+        // trtModelStream is the serialized model text, size is its length, TOOD
+        engine = runtime->deserializeCudaEngine(trtModelStream, size);
+        assert(engine != nullptr);
+    	context = engine->createExecutionContext();
+        assert(context != nullptr);
+        delete[] trtModelStream;
+        assert(engine->getNbBindings() == 2);
+        // In order to bind the buffers, we need to know the names of the input and output tensors.
+        // Note that indices are guaranteed to be less than IEngine::getNbBindings()
+        const int inputIndex = engine->getBindingIndex(INPUT_BLOB_NAME);
+        const int outputIndex = engine->getBindingIndex(OUTPUT_BLOB_NAME);
+        assert(inputIndex == 0);
+        assert(outputIndex == 1);
+        // Create GPU buffers on device
+        CUDA_CHECK(cudaMalloc(&buffers[inputIndex], BATCH_SIZE * 3 * INPUT_H * INPUT_W * sizeof (float)));
+        CUDA_CHECK(cudaMalloc(&buffers[outputIndex], BATCH_SIZE * OUTPUT_SIZE * sizeof (float)));
+        // Create stream
+        cudaStream_t stream;
+        CUDA_CHECK(cudaStreamCreate(&stream));
 
-		assert(BATCH_SIZE == 1); // This sample only support batch 1 for now
+        assert(BATCH_SIZE == 1); // This sample only support batch 1 for now
     }
 
     void doInference(float* input, float* output, int batchSize) {
         // DMA input batch data to device, infer on the batch asynchronously, and DMA output back to host
         CUDA_CHECK(cudaMemcpyAsync(buffers[0], input, batchSize * 3 * INPUT_H * INPUT_W * sizeof (float), cudaMemcpyHostToDevice, stream));
-        context.enqueue(batchSize, buffers, stream, nullptr);
+        context->enqueue(batchSize, buffers, stream, nullptr);
         CUDA_CHECK(cudaMemcpyAsync(output, buffers[1], batchSize * OUTPUT_SIZE * sizeof (float), cudaMemcpyDeviceToHost, stream));
         cudaStreamSynchronize(stream);
+    }
+
+    std::vector<sl::uint2> cvt(const cv::Rect &bbox_in){
+        std::vector<sl::uint2> bbox_out(4);
+        bbox_out[0] = sl::uint2(bbox_in.x, bbox_in.y);
+        bbox_out[1] = sl::uint2(bbox_in.x + bbox_in.width, bbox_in.y);
+        bbox_out[2] = sl::uint2(bbox_in.x + bbox_in.width, bbox_in.y + bbox_in.height);
+        bbox_out[3] = sl::uint2(bbox_in.x, bbox_in.y + bbox_in.height);
+        return bbox_out;
     }
 }
 
