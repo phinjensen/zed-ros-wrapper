@@ -727,6 +727,7 @@ private:
     bool mObjDetSportsEnable = true;
 
     sl::DETECTION_MODEL mObjDetModel = sl::DETECTION_MODEL::MULTI_CLASS_BOX;
+    Yolo::Model* mObjDetCustomModel = nullptr;
 
     ros::Publisher mPubObjDet;
 }; // class ZEDROSWrapperNodelet

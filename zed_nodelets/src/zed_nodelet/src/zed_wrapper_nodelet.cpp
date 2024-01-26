@@ -23,7 +23,7 @@
 #include <sstream>
 
 #include "zed_wrapper_nodelet.hpp"
-#include "yololayer.h"
+#include "custom_yolo.hpp"
 #include "common.hpp"
 #include "utils.h"
 #include "utils.hpp"
@@ -1453,6 +1453,10 @@ bool ZEDWrapperNodelet::start_obj_detect()
         }
     }
 
+    if (mObjDetModel == sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS) {
+        mObjDetCustomModel = new Yolo::Model("/home/marsrover/weights.wts");
+    }
+
     mObjDetRunning = true;
     return false;
 }
@@ -1463,6 +1467,7 @@ void ZEDWrapperNodelet::stop_obj_detect()
         NODELET_INFO_STREAM("*** Stopping Object Detection ***");
         mObjDetRunning = false;
         mObjDetEnabled = false;
+        delete mObjDetCustomModel;
         mZed.disableObjectDetection();
     }
 }
@@ -4267,9 +4272,6 @@ bool ZEDWrapperNodelet::on_start_object_detection(zed_interfaces::start_object_d
     }
     mObjDetModel = static_cast<sl::DETECTION_MODEL>(req.model);
 
-	if (mObjDetModel == sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS) {
-	}
-
     mObjDetMaxRange = req.max_range;
     if (mObjDetMaxRange > mCamMaxDepth) {
         NODELET_WARN("Detection max range cannot be major than depth max range. Automatically fixed.");
@@ -4339,31 +4341,13 @@ void ZEDWrapperNodelet::processDetectedObjects(ros::Time t)
     cv::Mat left_cv_rgb;
 
     if (mObjDetModel == sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS && mZed.grab() == sl::ERROR_CODE::SUCCESS) {
-		static float data[Yolo::BATCH_SIZE * 3 * Yolo::INPUT_H * Yolo::INPUT_W];
-		static float prob[Yolo::BATCH_SIZE * Yolo::OUTPUT_SIZE];
-
         mZed.retrieveImage(left_sl, sl::VIEW::LEFT);
 
         // Preparing inference
-        cv::Mat left_cv_rgba = slMat2cvMat(left_sl);
-        cv::cvtColor(left_cv_rgba, left_cv_rgb, cv::COLOR_BGRA2BGR);
-        if (left_cv_rgb.empty()) return;
-        cv::Mat pr_img = preprocess_img(left_cv_rgb, Yolo::INPUT_W, Yolo::INPUT_H); // letterbox BGR to RGB
-        int i = 0;
-        int batch = 0;
-        for (int row = 0; row < Yolo::INPUT_H; ++row) {
-            uchar* uc_pixel = pr_img.data + row * pr_img.step;
-            for (int col = 0; col < Yolo::INPUT_W; ++col) {
-                data[batch * 3 * Yolo::INPUT_H * Yolo::INPUT_W + i] = (float) uc_pixel[2] / 255.0;
-                data[batch * 3 * Yolo::INPUT_H * Yolo::INPUT_W + i + Yolo::INPUT_H * Yolo::INPUT_W] = (float) uc_pixel[1] / 255.0;
-                data[batch * 3 * Yolo::INPUT_H * Yolo::INPUT_W + i + 2 * Yolo::INPUT_H * Yolo::INPUT_W] = (float) uc_pixel[0] / 255.0;
-                uc_pixel += 3;
-                ++i;
-            }
-        }
+        float prob
 
         // Running inference
-        Yolo::doInference(data, prob, Yolo::BATCH_SIZE);
+        mObjDetCustomModel.inferImage(left_sl);
         std::vector<std::vector<Yolo::Detection>> batch_res(Yolo::BATCH_SIZE);
         auto& res = batch_res[batch];
         nms(res, &prob[batch * Yolo::OUTPUT_SIZE], Yolo::CONF_THRESH, Yolo::NMS_THRESH);
